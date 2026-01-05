@@ -1,287 +1,352 @@
+import tkinter as tk
+from tkinter import filedialog, Scale, HORIZONTAL
+from PIL import Image, ImageTk
 import cv2
 import numpy as np
-from tkinter import Tk, Frame, Button, Canvas, Scrollbar, Label, Scale, HORIZONTAL, filedialog
-from PIL import Image, ImageTk
-
-# 使用固定的 HSV 範圍提取膚色區域
-def detect_skin_hsv(image):
-        hsv_image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-        lower_skin = np.array([0, 40, 70], dtype="uint8")
-        upper_skin = np.array([25, 255, 255], dtype="uint8")
-        skin_mask = cv2.inRange(hsv_image, lower_skin, upper_skin)
-
-        return skin_mask
 
 class ImageEditorApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("DIP 期末專題")
+        self.root.title("DIP 期末專題 - 影像處理工具")
+        self.root.geometry("1000x700")
 
-        # 初始化變數
-        self.image = None  # 原始圖片
-        self.processed_image = None  # 處理後圖片
-        self.history = []  # Undo 堆疊
-        self.redo_stack = []  # Redo 堆疊
-        self.skin_mask = None  # 膚色掩膜
-
+        # --- 資料狀態管理 ---
+        self.original_img = None  
+        self.current_img = None
+        
+        # 紀錄步驟用的堆疊
+        self.history = []     
+        self.redo_stack = []  
+        
+        # 角色濾鏡參數表
         self.character_filters = {
             "goblin": {"brightness": 21, "contrast": 0.94, "gamma": 0.46, "hue": 32.5, "texture": "gaussian_v"},
             "na_vi": {"brightness": 9, "contrast": 1.05, "gamma": 0.57, "hue": 96.0, "texture": "gaussian"},
             "minion": {"brightness": 15, "contrast": 1.16, "gamma": 0.52, "hue": 16.0, "texture": "smooth_blur"},
-            "patrick": {"brightness": 10, "contrast": 1.12, "gamma": 0.91, "hue": -10.0, "texture": "smooth_gaussianBlurh"}
+            "patrick": {"brightness": 10, "contrast": 1.12, "gamma": 0.91, "hue": -10.0, "texture": "smooth_gaussianBlur"}
         }
-    
-        # 建立界面
-        self.create_ui()
 
-    def create_ui(self):
-        # 主框架
-        main_frame = Frame(self.root)
-        main_frame.pack(fill="both", expand=True)
+        # 介面顯示用的變數
+        self.tk_main_img = None
+        self.tk_side_img = None
+        self.image_loaded = False
 
-        # 工具列 (左側)
-        self.tool_frame = Frame(main_frame, width=200, bg="lightgray")
-        self.tool_frame.pack(side="left", fill="y")
+        # 綁定視窗縮放事件
+        self.root.bind("<Configure>", self.onResize)
+        
+        # 建置畫面
+        self.buildGUI()
 
-        # 畫布區域 (中央)
-        self.canvas = Canvas(main_frame, bg="white")
-        self.canvas.pack(side="left", fill="both", expand=True)
+    # =================================== GUI 介面佈局 ===================================
+    def buildGUI(self):
+        # 左側工具列容器
+        self.left_toolbar = tk.Frame(self.root, width=150, bg="#d3d3d3", padx=5, pady=5)
+        self.left_toolbar.pack(side="left", fill="y")
+        
+        # 初始顯示主工具選單
+        self.showMainTools() 
 
-        # 操作按鈕
-        self.control_frame = Frame(main_frame, width=200)
-        self.control_frame.pack(side="right", fill='y')
-        self.original_canvas = Canvas(self.control_frame, width=150, height=150, bg="gray")
-        self.original_canvas.pack(pady=10)
-        Button(self.control_frame, text="另存新檔", command=self.save_image).pack(fill="x", pady=2)
-        Button(self.control_frame, text="重置", command=self.reset_image).pack(fill="x", pady=2)
-        Button(self.control_frame, text="復原", command=self.undo).pack(fill="x", pady=2)
-        Button(self.control_frame, text="取消復原", command=self.redo).pack(fill="x", pady=2)
+        # 右側功能欄
+        self.right_sidebar = tk.Frame(self.root, width=200, bg="#f0f0f0", padx=10, pady=10)
+        self.right_sidebar.pack(side="right", fill="y")
+        
+        # 右上角原始影像預覽框 (Canvas)
+        self.side_canvas = tk.Canvas(self.right_sidebar, width=180, height=150, bg="#808080", highlightthickness=0)
+        self.side_canvas.pack(pady=(10, 20))
+        
+        # 右側按鈕
+        tk.Button(self.right_sidebar, text="另存新檔", width=20, command=self.saveImg).pack(pady=2)
+        tk.Button(self.right_sidebar, text="重置", width=20, command=self.resetImg).pack(pady=2)
+        tk.Button(self.right_sidebar, text="復原", width=20, command=self.undo).pack(pady=2)
+        tk.Button(self.right_sidebar, text="取消復原", width=20, command=self.redo).pack(pady=2)
 
-        # 顯示主工具列
-        self.show_main_tools()
-            
-    # 工具列
-    def show_main_tools(self):
-        self.clear_tool_frame()
-        Label(self.tool_frame, text="工具列", bg="lightgray", font=("Arial", 16)).pack(pady=10)
-        Button(self.tool_frame, text="開啟圖片", command=self.open_image).pack(pady=5)
-        Button(self.tool_frame, text="膚色校正", command=self.show_skin_correction_tools).pack(pady=5)
-        Button(self.tool_frame, text="角色濾鏡", command=self.show_skin_tone_tools).pack(pady=5)
+        # 中央畫布
+        self.canvas_area = tk.Frame(self.root, bg="white", highlightbackground="orange", highlightthickness=1)
+        self.canvas_area.pack(side="left", fill="both", expand=True)
 
-    def open_image(self):
-        file_path = filedialog.askopenfilename(filetypes=[("Image files", "*.jpg *.png *.jpeg")])
-        if file_path:
-            self.image = cv2.imread(file_path)
-        self.processed_image = self.image.copy()
-        self.history = [self.image.copy()]
-        self.display_image(self.image)  # 顯示處理畫布中的圖片
-        self.display_original_image()  # 顯示右上角的原始影像
+        self.main_display = tk.Label(self.canvas_area, text="畫布區", font=("System", 30), fg="orange", bg="white")
+        self.main_display.pack(fill="both", expand=True)
 
-    def display_original_image(self):
-        if self.image is not None:
-            # 縮放圖片至 150x150 的範圍內
-            img_height, img_width = self.image.shape[:2]
-            scale = min(150 / img_width, 150 / img_height)
-            new_width = int(img_width * scale)
-            new_height = int(img_height * scale)
-
-            # 轉換成 Tkinter 可用的圖片格式
-            resized_image = cv2.resize(self.image, (new_width, new_height), interpolation=cv2.INTER_AREA)
-            rgb_image = cv2.cvtColor(resized_image, cv2.COLOR_BGR2RGB)
-            pil_image = Image.fromarray(rgb_image)
-            self.original_tk_image = ImageTk.PhotoImage(pil_image)
-
-            # 清空並顯示圖片於原始影像 Canvas
-            self.original_canvas.delete("all")
-            self.original_canvas.create_image(0, 0, anchor="nw", image=self.original_tk_image)
-
-
-    def display_image(self, img):
-        # 取得處理後圖片的寬高
-        img_height, img_width = img.shape[:2]
-
-        # 取得畫布大小
-        canvas_width = self.canvas.winfo_width()
-        canvas_height = self.canvas.winfo_height()
-
-        # 計算等比例縮放比例
-        scale = min(canvas_width / img_width, canvas_height / img_height)
-        new_width = int(img_width * scale)
-        new_height = int(img_height * scale)
-
-        # 縮放圖片
-        resized_image = cv2.resize(img, (new_width, new_height), interpolation=cv2.INTER_AREA)
-
-        # 轉換成 Tkinter 可用的格式
-        rgb_image = cv2.cvtColor(resized_image, cv2.COLOR_BGR2RGB)
-        pil_image = Image.fromarray(rgb_image)
-        self.tk_image = ImageTk.PhotoImage(pil_image)
-
-        # 清空畫布，將圖片置於中央
-        self.canvas.delete("all")
-        x_offset = (canvas_width - new_width) // 2  # 水平置中
-        y_offset = (canvas_height - new_height) // 2  # 垂直置中
-        self.canvas.create_image(x_offset, y_offset, anchor="nw", image=self.tk_image)
-
-        # 更新畫布範圍
-        self.canvas.config(scrollregion=self.canvas.bbox("all"))
-
-    def show_skin_correction_tools(self):
-        self.clear_tool_frame()
-        Label(self.tool_frame, text="膚色校正", bg="lightgray", font=("Arial", 14)).pack(pady=5)
-        self.add_adjustment_sliders()
-        Button(self.tool_frame, text="套用", command=self.apply_changes).pack(pady=5)
-        Button(self.tool_frame, text="上一頁", command=self.show_main_tools).pack(pady=5)
-
-    # 更新滑動條，綁定即時更新的函數
-    def add_adjustment_sliders(self):
-        Label(self.tool_frame, text="亮度").pack()
-        self.brightness_slider = Scale(self.tool_frame, from_=-50, to=50, resolution=1, orient=HORIZONTAL, command=self.update_skin_correction)
-        self.brightness_slider.pack()
-
-        Label(self.tool_frame, text="對比度").pack()
-        self.contrast_slider = Scale(self.tool_frame, from_=0.5, to=2.0, resolution=0.01, orient=HORIZONTAL, command=self.update_skin_correction)
-        self.contrast_slider.pack()
-
-        Label(self.tool_frame, text="Gamma").pack()
-        self.gamma_slider = Scale(self.tool_frame, from_=0.1, to=2.0, resolution=0.01, orient=HORIZONTAL, command=self.update_skin_correction)
-        self.gamma_slider.pack()
-
-        Label(self.tool_frame, text="色調調整").pack()
-        self.hue_shift_slider = Scale(self.tool_frame, from_=-10, to=150, resolution=0.5, orient=HORIZONTAL, command=self.update_skin_correction)
-        self.hue_shift_slider.pack()
-
-    def clear_tool_frame(self):
-        for widget in self.tool_frame.winfo_children():
+    def clearToolFrame(self):
+        for widget in self.left_toolbar.winfo_children():
             widget.destroy()
 
-    # 即時更新膚色校正效果，但不存入歷史堆疊
-    def update_skin_correction(self, event=None):
-        if self.processed_image is not None:
-            # 使用暫時變數 self.preview_image
-            self.preview_image = self.processed_image.copy()
+    def showMainTools(self):
+        self.clearToolFrame()
+        tk.Label(self.left_toolbar, text="工具列", bg="#d3d3d3", font=("Arial", 12, "bold")).pack(pady=10)
+        
+        tk.Button(self.left_toolbar, text="開啟圖片", width=12, command=self.openImg).pack(pady=5)
+        tk.Button(self.left_toolbar, text="膚色校正", width=12, command=self.showSkinCorrectionTools).pack(pady=5)
+        tk.Button(self.left_toolbar, text="角色濾鏡", width=12, command=self.showCharacterFilterTools).pack(pady=5)
 
-            # 檢測膚色區域
-            self.skin_mask = detect_skin_hsv(self.preview_image)
-            skin_region = cv2.bitwise_and(self.preview_image, self.preview_image, mask=self.skin_mask)
+    # =================================== 影像顯示與縮放邏輯 ===================================
+    def onResize(self, event):
+        if self.image_loaded and event.widget == self.root:
+            self.displayAll()
 
-            # 取得滑動條參數
-            alpha = self.contrast_slider.get()  # 對比度
-            beta = self.brightness_slider.get()  # 亮度
-            gamma = self.gamma_slider.get()  # Gamma
-            hue_shift = self.hue_shift_slider.get()  # 色調調整
+    def displayAll(self):
+        self.displayMiddleImg()
+        self.displayOriginalImg()
 
-            # 進行亮度、對比度、Gamma 與色調調整
-            corrected = cv2.convertScaleAbs(skin_region, alpha=alpha, beta=beta)
-            inv_gamma = 1.0 / gamma
-            table = np.array([((i / 255.0) ** inv_gamma) * 255 for i in np.arange(256)]).astype("uint8")
-            gamma_corrected = cv2.LUT(corrected, table)
+    def getResized(self, img, max_w, max_h):
+        h, w = img.shape[:2]
+        # 計算縮放比例，取較小值以確保圖片完整顯示
+        ratio = min(max_w / w, max_h / h)
+        new_w, new_h = max(int(w * ratio), 1), max(int(h * ratio), 1)
+        
+        return cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
-            hsv_image = cv2.cvtColor(gamma_corrected, cv2.COLOR_BGR2HSV)
-            h, s, v = cv2.split(hsv_image)
-            h = cv2.add(h, hue_shift)
-            hsv_corrected = cv2.merge([h, s, v])
-            self.preview_image[self.skin_mask > 0] = cv2.cvtColor(hsv_corrected, cv2.COLOR_HSV2BGR)[self.skin_mask > 0]
+    def displayMiddleImg(self, img_to_show=None):
+        img = img_to_show if img_to_show is not None else self.current_img
+        
+        if img is None: 
+            return
+        
+        self.root.update_idletasks()
+        canvas_w = max(self.canvas_area.winfo_width(), 100)
+        canvas_h = max(self.canvas_area.winfo_height(), 100)
 
-            # 即時顯示效果
-            self.display_image(self.preview_image)
+        # 邊距
+        resized_img = self.getResized(img, canvas_w - 20, canvas_h - 20)
+        
+        rgb_img = cv2.cvtColor(resized_img, cv2.COLOR_BGR2RGB)
+        self.tk_main_img = ImageTk.PhotoImage(Image.fromarray(rgb_img))
+        self.main_display.config(image=self.tk_main_img, text="")
 
-    # 將即時效果套用到 processed_image 並儲存變更
-    def apply_changes(self):
-        if hasattr(self, 'preview_image') and self.preview_image is not None:
-            self.processed_image = self.preview_image.copy()
-            self.history.append(self.processed_image.copy())  # 保存步驟
-            self.redo_stack.clear()  # 清空 redo 堆疊
-            self.display_image(self.processed_image)
-            print("套用變更")
+    def displayOriginalImg(self):
+        if self.original_img is None: 
+            return
+            
+        cw, ch = 180, 150
+        resized_img = self.getResized(self.original_img, cw, ch)
+        
+        rgb_img = cv2.cvtColor(resized_img, cv2.COLOR_BGR2RGB)
+        self.tk_side_img = ImageTk.PhotoImage(Image.fromarray(rgb_img))
+        
+        # 清除舊圖並置中顯示
+        self.side_canvas.delete("all") 
+        self.side_canvas.create_image(cw//2, ch//2, image=self.tk_side_img, anchor="center")
 
-    def show_skin_tone_tools(self):
-        self.clear_tool_frame()
-        Label(self.tool_frame, text="角色濾鏡", bg="lightgray", font=("Arial", 14)).pack(pady=5)
-        Button(self.tool_frame, text="哥布林", command=lambda: self.apply_character_filter("goblin")).pack(pady=2)
-        Button(self.tool_frame, text="納美人", command=lambda: self.apply_character_filter("na_vi")).pack(pady=2)
-        Button(self.tool_frame, text="Minion", command=lambda: self.apply_character_filter("minion")).pack(pady=2)
-        Button(self.tool_frame, text="派大星", command=lambda: self.apply_character_filter("patrick")).pack(pady=2)
-        Button(self.tool_frame, text="上一頁", command=self.show_main_tools).pack(pady=5)
+    def openImg(self):
+        file_path = filedialog.askopenfilename(filetypes=[("Image Files", "*.jpg;*.jpeg;*.png")])
+        if file_path:
+            img = cv2.imread(file_path)
+            
+            if img is not None:
+                self.original_img = img.copy()
+                self.current_img = img.copy()
+                self.history = [img.copy()]
+                self.redo_stack = []
+                self.image_loaded = True 
+                self.displayAll() 
 
-    # 套用角色濾鏡，包括亮度、對比度、Gamma 和噪點/紋理效果
-    def apply_character_filter(self, character):
-        if self.processed_image is not None:
-            params = self.character_filters[character]
-            self.skin_mask = detect_skin_hsv(self.processed_image)
+    # =================================== 膚色偵測與校正功能 ===================================
+    def detectSkinHSV(self, img):
+        hsv_img = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        # 膚色範圍
+        lower_skin = np.array([0, 40, 70], dtype="uint8")
+        upper_skin = np.array([25, 255, 255], dtype="uint8")
+        
+        return cv2.inRange(hsv_img, lower_skin, upper_skin)
 
-            # 提取膚色區域
-            skin_region = cv2.bitwise_and(self.processed_image, self.processed_image, mask=self.skin_mask)
+    def showSkinCorrectionTools(self):
+        if not self.image_loaded: 
+            return
+            
+        self.clearToolFrame()
 
-            # 1. 亮度、對比度、Gamma 調整
-            adjusted = cv2.convertScaleAbs(skin_region, alpha=params["contrast"], beta=params["brightness"])
-            inv_gamma = 1.0 / params["gamma"]
-            table = np.array([((i / 255.0) ** inv_gamma) * 255 for i in np.arange(256)]).astype("uint8")
-            gamma_corrected = cv2.LUT(adjusted, table)
+        # 備份
+        self.pre_correction_img = self.current_img.copy()
 
-            # 2. 色調調整
-            hsv_image = cv2.cvtColor(gamma_corrected, cv2.COLOR_BGR2HSV)
-            h, s, v = cv2.split(hsv_image)
-            h = cv2.add(h, params["hue"])
-            color_corrected = cv2.cvtColor(cv2.merge([h, s, v]), cv2.COLOR_HSV2BGR)
+        tk.Label(self.left_toolbar, text="膚色校正", bg="#d3d3d3", font=("Arial", 12, "bold")).pack(pady=5)
+        
+        # 滑桿
+        tk.Label(self.left_toolbar, text="亮度", bg="#d3d3d3").pack()
+        self.br_scale = Scale(self.left_toolbar, from_=-50, to=50, orient=HORIZONTAL, command=self.updateSkinPreview)
+        self.br_scale.set(0); self.br_scale.pack()
 
-            # 3. 紋理/噪點效果
-            if params["texture"] == "gaussian_v":
-                # 在 V 通道加高斯噪點
-                hsv_image = cv2.cvtColor(color_corrected, cv2.COLOR_BGR2HSV)
-                h, s, v = cv2.split(hsv_image)
-                noise = np.random.normal(0, 10, v.shape).astype(np.int16)  # 標準差減小到10
-                v = np.clip(v + noise, 0, 255).astype(np.uint8)  # 限制像素範圍
-                hsv_noisy = cv2.merge([h, s, v])
-                color_corrected = cv2.cvtColor(hsv_noisy, cv2.COLOR_HSV2BGR)
-            elif params["texture"] == "gaussian":
-                # 增加高斯雜訊
-                noise = np.random.normal(0, 15, color_corrected.shape).astype(np.int16)
-                color_corrected = np.clip(color_corrected + noise, 0, 255).astype(np.uint8)
-            elif params["texture"] == "smooth_blur":
-                # 均值濾波
-                color_corrected = cv2.blur(color_corrected, ksize=(3, 3))
-            elif params["texture"] == "smooth_gaussianBlur":
-                color_corrected = cv2.GaussianBlur(color_corrected, (3, 3), 0)
+        tk.Label(self.left_toolbar, text="對比度", bg="#d3d3d3").pack()
+        self.ct_scale = Scale(self.left_toolbar, from_=0.5, to=2.0, resolution=0.1, orient=HORIZONTAL, command=self.updateSkinPreview)
+        self.ct_scale.set(1.0); self.ct_scale.pack()
 
-            # 合併回原圖
-            result = self.processed_image.copy()
-            result[self.skin_mask > 0] = color_corrected[self.skin_mask > 0]
-            self.processed_image = result.copy()
+        tk.Label(self.left_toolbar, text="Gamma", bg="#d3d3d3").pack()
+        self.gm_scale = Scale(self.left_toolbar, from_=0.1, to=2.0, resolution=0.1, orient=HORIZONTAL, command=self.updateSkinPreview)
+        self.gm_scale.set(1.0); self.gm_scale.pack()
 
-            # 保存步驟並顯示
-            self.history.append(self.processed_image.copy())
+        tk.Label(self.left_toolbar, text="色調調整", bg="#d3d3d3").pack()
+        self.hue_scale = Scale(self.left_toolbar, from_=-10, to=150, resolution=1, orient=HORIZONTAL, command=self.updateSkinPreview)
+        self.hue_scale.set(0); self.hue_scale.pack()
+
+        # 功能按鈕
+        tk.Button(self.left_toolbar, text="套用變更", command=self.applyProcessedImg).pack(pady=10)
+        tk.Button(self.left_toolbar, text="取消/返回", command=self.cancelCorrection).pack()
+
+    def updateSkinPreview(self, event=None):
+        if self.current_img is None: 
+            return
+        
+        img = self.pre_correction_img.copy()
+
+        mask = self.detectSkinHSV(img)
+        skin_region = cv2.bitwise_and(img, img, mask=mask)
+
+        # 抓滑桿參數
+        alpha = self.ct_scale.get() # 對比度
+        beta = self.br_scale.get() # 亮度
+        gamma = self.gm_scale.get() # Gamma
+        hue_shift = self.hue_scale.get()   # 色調調整
+
+        # 1.亮度與對比
+        corrected = cv2.convertScaleAbs(skin_region, alpha=alpha, beta=beta)
+        
+        # 2.Gamma 校正
+        inv_gamma = 1.0 / gamma
+        table = np.array([((i / 255.0) ** inv_gamma) * 255 for i in np.arange(256)]).astype("uint8")
+        gamma_corrected = cv2.LUT(corrected, table)
+
+        # 3.色調調整
+        hsv_res = cv2.cvtColor(gamma_corrected, cv2.COLOR_BGR2HSV)
+        h, s, v = cv2.split(hsv_res)
+        h = cv2.add(h, hue_shift)
+        hsv_res = cv2.merge([h, s, v])
+        
+        # 合併回原圖
+        img[mask > 0] = cv2.cvtColor(hsv_res, cv2.COLOR_HSV2BGR)[mask > 0]
+        
+        # 暫存結果給套用按鈕用
+        self.temp_preview = img 
+        self.displayMiddleImg(img) 
+
+    def applyProcessedImg(self):
+        # 寫入歷史紀錄
+        if hasattr(self, 'temp_preview'):
+            self.current_img = self.temp_preview.copy()
+            self.history.append(self.current_img.copy()) 
             self.redo_stack.clear()
-            self.display_image(self.processed_image)
+            self.displayAll()
+            self.showMainTools()
 
-    # 右側按鈕
-    def save_image(self):
-        if self.processed_image is not None:
-            file_path = filedialog.asksaveasfilename(defaultextension=".jpg",
-                                                     filetypes=[("Image files", "*.jpg *.png *.jpeg")])
-            if file_path:
-                cv2.imwrite(file_path, self.processed_image)
+    def cancelCorrection(self):
+        # 不要了
+        if hasattr(self, 'pre_correction_img'):
+            self.current_img = self.pre_correction_img.copy()
+            self.displayAll()
+        self.showMainTools()
 
-    def reset_image(self):
-        if self.image is not None:
-            self.processed_image = self.image.copy()
-            self.display_image(self.processed_image)
+    # =================================== 角色濾鏡功能 ===================================
+    def showCharacterFilterTools(self):
+        if not self.image_loaded: 
+            return
+            
+        self.clearToolFrame()
 
+        self.pre_filter_img = self.current_img.copy() 
+        self.temp_preview = self.current_img.copy() 
+
+        tk.Label(self.left_toolbar, text="角色濾鏡", bg="#d3d3d3", font=("Arial", 12, "bold")).pack(pady=10)
+        
+        for name in self.character_filters.keys():
+            tk.Button(self.left_toolbar, text=name.capitalize(), width=12, 
+                      command=lambda n=name: self.previewCharacterFilter(n)).pack(pady=2)
+            
+        tk.Frame(self.left_toolbar, height=20, bg="#d3d3d3").pack() 
+
+        tk.Button(self.left_toolbar, text="套用變更", width=12, bg="#d3d3d3", command=self.applyFilterChanges).pack(pady=5)
+        tk.Button(self.left_toolbar, text="取消/返回", width=12, bg="#d3d3d3", command=self.cancelFilter).pack(pady=5)
+
+    def previewCharacterFilter(self, character):
+        if self.pre_filter_img is None: 
+            return
+        
+        params = self.character_filters[character]
+        img = self.pre_filter_img.copy() 
+        mask = self.detectSkinHSV(img)
+        
+        skin_region = cv2.bitwise_and(img, img, mask=mask)
+        
+        # 進行色彩與紋理調整
+        adjusted = cv2.convertScaleAbs(skin_region, alpha=params["contrast"],\
+                                        beta=params["brightness"])
+        
+        inv_gamma = 1.0 / params["gamma"]
+        table = np.array([((i / 255.0) ** inv_gamma) \
+                          * 255 for i in np.arange(256)]).astype("uint8")
+        gamma_res = cv2.LUT(adjusted, table)
+
+        hsv_res = cv2.cvtColor(gamma_res, cv2.COLOR_BGR2HSV)
+        h, s, v = cv2.split(hsv_res)
+        h = cv2.add(h, params["hue"])
+        color_corrected = cv2.cvtColor(cv2.merge([h, s, v]), cv2.COLOR_HSV2BGR)
+
+        # 處理特殊紋理效果
+        if params["texture"] == "gaussian_v":
+            hsv_noise = cv2.cvtColor(color_corrected, cv2.COLOR_BGR2HSV)
+            h_n, s_n, v_n = cv2.split(hsv_noise)
+            noise = np.random.normal(0, 10, v_n.shape).astype(np.int16)
+            v_n = np.clip(v_n + noise, 0, 255).astype(np.uint8)
+            color_corrected = cv2.cvtColor(cv2.merge([h_n, s_n, v_n]), cv2.COLOR_HSV2BGR)
+            
+        elif params["texture"] == "gaussian":
+            noise = np.random.normal(0, 15, color_corrected.shape).astype(np.int16)
+            color_corrected = np.clip(color_corrected + noise, 0, 255).astype(np.uint8)
+            
+        elif params["texture"] == "smooth_blur":
+            color_corrected = cv2.blur(color_corrected, (3, 3))
+            
+        elif params["texture"] == "smooth_gaussianBlur":
+            color_corrected = cv2.GaussianBlur(color_corrected, (3, 3), 0)
+
+        # 合併顯示
+        img[mask > 0] = color_corrected[mask > 0]
+        self.temp_preview = img.copy() 
+        self.displayMiddleImg(img)
+
+    def applyFilterChanges(self):
+        if hasattr(self, 'temp_preview'):
+            self.current_img = self.temp_preview.copy()
+            self.history.append(self.current_img.copy())
+            self.redo_stack.clear()
+            self.displayAll()
+            self.showMainTools()
+
+    def cancelFilter(self):
+        if hasattr(self, 'pre_filter_img'):
+            self.current_img = self.pre_filter_img.copy()
+            self.displayAll()
+        self.showMainTools()
+    
+    # =================================== 輔助功能 (Undo/Redo/Save) ===================================    
     def undo(self):
         if len(self.history) > 1:
-            self.redo_stack.append(self.history.pop())  # 將當前步驟加入 redo 堆疊
-            self.processed_image = self.history[-1].copy()  # 復原至上一個步驟
-            self.display_image(self.processed_image)
-            print("undo")
+            self.redo_stack.append(self.history.pop())
+            self.current_img = self.history[-1].copy()
+            self.displayAll()
 
     def redo(self):
         if self.redo_stack:
-            self.history.append(self.redo_stack.pop())  # 將 redo 堆疊中的步驟恢復
-            self.processed_image = self.history[-1].copy()
-            self.display_image(self.processed_image)
-            print("redo")
+            img = self.redo_stack.pop()
+            self.history.append(img.copy())
+            self.current_img = img.copy()
+            self.displayAll()
 
+    def saveImg(self):
+        if self.current_img is None: 
+            return
+            
+        path = filedialog.asksaveasfilename(defaultextension=".png", 
+                                            filetypes=[("PNG", "*.png"), ("JPG", "*.jpg")])
+        if path: 
+            cv2.imwrite(path, self.current_img)
+
+    def resetImg(self):
+        if self.original_img is not None:
+            self.current_img = self.original_img.copy()
+            self.history = [self.original_img.copy()]
+            self.redo_stack = []
+            self.displayAll()
+            self.showMainTools()
+        
 if __name__ == "__main__":
-    root = Tk()
+    root = tk.Tk()
     app = ImageEditorApp(root)
     root.mainloop()
